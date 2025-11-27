@@ -105,8 +105,8 @@ pcm_vol = np.sum(is_pcm) * dx * area
 pcm_mass = pcm_vol * props['pcm']['rho']
 
 # mushy zone parameters - adjusted for numerical stability and realistic Stefan behavior
-# A wider mushy zone improves numerical stability while still capturing phase change physics
-dT_mushy = 2.0  # Wider mushy zone for better numerical stability (prevents overflow)
+# A wider mushy zone improves numerical stability by reducing gradients in the phase change region
+dT_mushy = 2.0  # Wider mushy zone for better numerical stability
 Tm = props['pcm']['Tm']
 L = props['pcm']['L']
 
@@ -136,7 +136,7 @@ def tdma(a, b, c, d):
     dp = np.empty(n)
     
     # Small epsilon to prevent division by zero
-    eps = 1e-30
+    eps = 1e-15
     
     cp[0] = c[0] / (b[0] + eps)
     dp[0] = d[0] / (b[0] + eps)
@@ -271,7 +271,7 @@ for n in range(1, nt+1):
         # rhoCp*V/dt * (T_new - T_old) = A_L*(T_L_new - T_new) + A_R*(T_R_new - T_new)
         # Rearranging: (rhoCp*V/dt + A_L + A_R)*T_new - A_L*T_L_new - A_R*T_R_new = rhoCp*V/dt * T_old
         b[i] = b_i + A_L + A_R
-        d[i] = rhoCp[i]*vol/dt * T[i]  # RHS only has the old temperature term
+        d[i] = rhoCp[i]*vol/dt * T[i]
         if i > 0:
             a[i-1] = -A_L
         if i < N-1:
@@ -281,10 +281,12 @@ for n in range(1, nt+1):
     T_out = T_ambient(t)
     # Stefan effect: add effective resistance that grows with melt fraction
     # This creates the characteristic decreasing melting rate as the liquid layer grows
-    # R_stefan = STEFAN_RESISTANCE_FACTOR * current_mf
-    # This adds resistance to heat transfer, reducing effective h_out
     R_stefan = STEFAN_RESISTANCE_FACTOR * current_mf
-    h_eff = 1.0 / (1.0/h_out + R_stefan) if R_stefan > 0 else h_out
+    # Calculate effective heat transfer coefficient with Stefan resistance
+    if R_stefan > 0 and h_out > 0:
+        h_eff = 1.0 / (1.0/h_out + R_stefan)
+    else:
+        h_eff = h_out
     A_conv = h_eff * area
     b[0] += A_conv
     d[0] += A_conv * T_out
