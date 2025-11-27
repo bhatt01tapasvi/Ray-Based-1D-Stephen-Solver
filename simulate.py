@@ -14,9 +14,16 @@ Features:
 """
 
 import os
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+T_MIN_BOUND = -50.0  # Minimum temperature bound [°C]
+T_MAX_BOUND = 150.0  # Maximum temperature bound [°C]
 
 # ==============================================================================
 # Default PCM Material Properties (Paraffin RT-42)
@@ -52,6 +59,23 @@ DEFAULT_PARAMS = {
     'alpha_abs': 0.9,      # Absorptivity of the surface
     'A_surface': 0.01,     # Surface area [m²]
 }
+
+
+def harmonic_mean(a, b, eps=1e-10):
+    """
+    Calculate the harmonic mean of two values.
+    
+    Used for interface thermal conductivity calculation.
+    
+    Args:
+        a: First value
+        b: Second value
+        eps: Small value to prevent division by zero
+    
+    Returns:
+        Harmonic mean: 2*a*b / (a + b)
+    """
+    return 2 * a * b / (a + b + eps)
 
 
 def create_results_directory(base_dir="results"):
@@ -449,8 +473,8 @@ def simulate_distributed(p=None, verbose=True):
             # Interior nodes: explicit update
             for i in range(1, n-1):
                 # Interface thermal conductivities (harmonic mean)
-                k_e = 2 * k_eff[i] * k_eff[i+1] / (k_eff[i] + k_eff[i+1] + 1e-10)
-                k_w = 2 * k_eff[i] * k_eff[i-1] / (k_eff[i] + k_eff[i-1] + 1e-10)
+                k_e = harmonic_mean(k_eff[i], k_eff[i+1])
+                k_w = harmonic_mean(k_eff[i], k_eff[i-1])
                 
                 # Heat flux (positive = heat flowing in positive x direction)
                 q_e = k_e * (T[i+1] - T[i]) / dx
@@ -517,7 +541,7 @@ def simulate_distributed(p=None, verbose=True):
                 T[i] = (Tm + dT) + (H[i] - H_melt_end) / (rho * cp_l)
         
         # Ensure temperature bounds
-        T = np.clip(T, -50, 150)
+        T = np.clip(T, T_MIN_BOUND, T_MAX_BOUND)
         
         # Find interface position (where liquid fraction ≈ 0.5)
         interface_idx = np.argmin(np.abs(f_local - 0.5))
@@ -691,7 +715,7 @@ def simulate_lumped(p=None, verbose=True):
                 T = T_new
         
         # Bounds checking
-        T = np.clip(T, -50, 150)
+        T = np.clip(T, T_MIN_BOUND, T_MAX_BOUND)
         mf = np.clip(mf, 0, 1)
         
         # Store results at regular intervals
@@ -858,8 +882,6 @@ def compare_models(params=None, save_dir=None):
     plt.close(fig)
     
     # Save numerical results to CSV
-    import csv
-    
     csv_file = os.path.join(save_dir, 'results.csv')
     with open(csv_file, 'w', newline='') as f:
         writer = csv.writer(f)
