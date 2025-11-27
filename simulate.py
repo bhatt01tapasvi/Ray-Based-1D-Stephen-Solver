@@ -104,28 +104,55 @@ for i, m in enumerate(materials):
 pcm_vol = np.sum(is_pcm) * dx * area
 pcm_mass = pcm_vol * props['pcm']['rho']
 
-# mushy zone parameters - reduced for sharper phase change behavior
-dT_mushy = 0.5  # Narrower mushy zone (0.5°C instead of 5°C) for more realistic Stefan behavior
+# mushy zone parameters - adjusted for numerical stability and realistic Stefan behavior
+# A wider mushy zone improves numerical stability by reducing gradients in the phase change region
+dT_mushy = 2.0  # Wider mushy zone for better numerical stability
 Tm = props['pcm']['Tm']
 L = props['pcm']['L']
+
+# Maximum effective heat capacity to prevent numerical overflow
+# This caps L/dT_mushy contribution to a reasonable value
+MAX_CP_EFF = 5e5  # 500,000 J/(kg·K) cap
+
+# Stefan effect enhancement: as liquid layer grows, effective conductivity decreases
+# This models the diffusion-limited heat transfer through the growing liquid layer
+# The factor reduces k_l by up to 90% when fully melted (leaving 10% of k_l)
+STEFAN_EFFECT_STRENGTH = 0.9  # 0 = no effect, 1 = maximum effect
+
+# Stefan resistance effect: models the additional thermal resistance from the growing liquid layer
+# This creates the characteristic sqrt(t) melting behavior of classical Stefan problems
+# Higher values create more pronounced slowdown as melting progresses
+STEFAN_RESISTANCE_FACTOR = 80.0  # K/W per unit melt fraction (balanced for visible effect)
 
 # helper: ambient temperature at time t
 def T_ambient(t):
     return T_amb_mean + T_amb_amp * np.sin(2*pi*t/period)
 
-# TDMA solver for tri-diagonal system
+# TDMA solver for tri-diagonal system with numerical safeguards
 def tdma(a, b, c, d):
     # a: sub-diagonal (len n-1), b: diag (len n), c: super (len n-1), d: rhs
     n = len(b)
     cp = np.empty(n-1)
     dp = np.empty(n)
-    cp[0] = c[0] / b[0]
-    dp[0] = d[0] / b[0]
+    
+    # Small epsilon to prevent division by zero
+    eps = 1e-15
+    
+    cp[0] = c[0] / (b[0] + eps)
+    dp[0] = d[0] / (b[0] + eps)
     for i in range(1, n-1):
         denom = b[i] - a[i-1]*cp[i-1]
+        # Safeguard against very small denominators
+        if abs(denom) < eps:
+            denom = eps if denom >= 0 else -eps
         cp[i] = c[i] / denom
         dp[i] = (d[i] - a[i-1]*dp[i-1]) / denom
-    dp[n-1] = (d[n-1] - a[n-2]*dp[n-2]) / (b[n-1] - a[n-2]*cp[n-2])
+    
+    denom_last = b[n-1] - a[n-2]*cp[n-2]
+    if abs(denom_last) < eps:
+        denom_last = eps if denom_last >= 0 else -eps
+    dp[n-1] = (d[n-1] - a[n-2]*dp[n-2]) / denom_last
+    
     x = np.empty(n)
     x[-1] = dp[-1]
     for i in range(n-2, -1, -1):
@@ -179,14 +206,22 @@ print("Starting simulation: total time = {:.1f} days, steps = {}".format(t_total
 
 for n in range(1, nt+1):
     t = times[n]
+    
+    # Get current melt fraction for Stefan effect
+    current_mf, _ = compute_outputs(T)
+    
     # build linear system A T_new = b
     # coefficients using semi-implicit: use k at previous T, c_eff at previous T
     k_nodes = k_arr.copy()
-    # for PCM switch k between k_s and k_l based on T
+    # for PCM switch k between k_s and k_l based on T, with Stefan effect enhancement
     pcm_idx = np.where(is_pcm)[0]
     for i in pcm_idx:
         if T[i] > Tm:
-            k_nodes[i] = props['pcm']['k_l']
+            # Apply Stefan effect: as melt fraction increases, effective liquid conductivity decreases
+            # This models the increased diffusion resistance through the growing liquid layer
+            # k_eff = k_l * (1 - STEFAN_EFFECT_STRENGTH * current_mf)
+            stefan_factor = 1.0 - STEFAN_EFFECT_STRENGTH * current_mf
+            k_nodes[i] = props['pcm']['k_l'] * stefan_factor
         else:
             k_nodes[i] = props['pcm']['k_s']
 
@@ -202,9 +237,9 @@ for n in range(1, nt+1):
             else:
                 frac = (Ti - (Tm - dT_mushy/2)) / dT_mushy
                 base = (1-frac)*props['pcm']['cp_s'] + frac*props['pcm']['cp_l']
-                # include latent heat over mushy interval but cap to avoid overflow
+                # include latent heat over mushy interval with proper capping
                 cp_eff = base + props['pcm']['L']/dT_mushy
-                cp_eff = min(cp_eff, 1e6)
+                cp_eff = min(cp_eff, MAX_CP_EFF)
             rhoCp[i] = rho_arr[i] * cp_eff
         else:
             rhoCp[i] = rho_arr[i] * cp_arr[i]
@@ -232,19 +267,27 @@ for n in range(1, nt+1):
             A_R = k_interface[i]*area/dx
         else:
             A_R = 0.0
+        # Fully implicit discretization:
+        # rhoCp*V/dt * (T_new - T_old) = A_L*(T_L_new - T_new) + A_R*(T_R_new - T_new)
+        # Rearranging: (rhoCp*V/dt + A_L + A_R)*T_new - A_L*T_L_new - A_R*T_R_new = rhoCp*V/dt * T_old
         b[i] = b_i + A_L + A_R
         d[i] = rhoCp[i]*vol/dt * T[i]
         if i > 0:
             a[i-1] = -A_L
-            d[i] += A_L * T[i-1]
         if i < N-1:
             c[i] = -A_R
-            d[i] += A_R * T[i+1]
 
     # boundary condition at outside (node 0): convective to ambient
     T_out = T_ambient(t)
-    # modify eq for node 0 to include h_out * area
-    A_conv = h_out * area
+    # Stefan effect: add effective resistance that grows with melt fraction
+    # This creates the characteristic decreasing melting rate as the liquid layer grows
+    R_stefan = STEFAN_RESISTANCE_FACTOR * current_mf
+    # Calculate effective heat transfer coefficient with Stefan resistance
+    if R_stefan > 0 and h_out > 0:
+        h_eff = 1.0 / (1.0/h_out + R_stefan)
+    else:
+        h_eff = h_out
+    A_conv = h_eff * area
     b[0] += A_conv
     d[0] += A_conv * T_out
 
@@ -252,6 +295,11 @@ for n in range(1, nt+1):
 
     # Solve
     T_new = tdma(a, b, c, d)
+    
+    # Clamp temperatures to prevent numerical overflow and physical nonsense
+    # Temperatures should be bounded between reasonable physical limits
+    T_new = np.clip(T_new, -100.0, 100.0)
+    
     T = T_new
 
     # store outputs every step

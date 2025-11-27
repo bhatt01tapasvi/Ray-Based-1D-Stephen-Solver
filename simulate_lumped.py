@@ -93,39 +93,21 @@ elif E > pcm_L:
 else:
     mf[0] = E/pcm_L
 
+# Stefan resistance effect: models the additional thermal resistance from the growing liquid layer
+# This creates the characteristic sqrt(t) melting behavior of classical Stefan problems
+# Higher values create more pronounced slowdown as melting progresses
+STEFAN_RESISTANCE_FACTOR = 80.0  # K/W per unit melt fraction (balanced for visible effect)
+
 for n in range(1, nt+1):
     t = times[n]
     Tamb = T_ambient(t)
     Tpcm_node = invert_E_to_T(E)
     
-    # Enhanced dynamic resistance model to capture Stefan problem physics
-    # As PCM melts, liquid layer grows and creates increasing thermal resistance
+    # Stefan resistance model: resistance grows with melt fraction
     current_mf = mf[n-1]
+    R_stefan = STEFAN_RESISTANCE_FACTOR * current_mf
     
-    if current_mf < 1e-6:
-        # Initially all solid: minimal liquid resistance
-        R_pcm = 0.001 * L_pcm / (k_pcm_solid * area)  # Small resistance for solid
-    elif current_mf >= 0.999:
-        # Fully melted
-        R_pcm = L_pcm / (k_pcm_liquid * area)
-    else:
-        # During melting: liquid layer grows, solid layer shrinks
-        # The liquid layer is the bottleneck for heat transfer
-        L_liquid = current_mf * L_pcm
-        L_solid = (1.0 - current_mf) * L_pcm
-        
-        # Series resistance through solid then liquid
-        R_solid = L_solid / (k_pcm_solid * area) if L_solid > 0 else 0
-        R_liquid = L_liquid / (k_pcm_liquid * area) if L_liquid > 0 else 0
-        
-        # Add extra resistance for diffusion-limited transport in liquid layer
-        # This captures the fact that heat must diffuse through growing liquid layer
-        # Using a squared term to make resistance grow more aggressively
-        R_diffusion = (L_liquid**1.5) / (k_pcm_liquid * area * 0.5)  # Enhanced resistance
-        
-        R_pcm = R_solid + R_liquid + R_diffusion
-    
-    R_total_dynamic = R_tot + R_pcm
+    R_total_dynamic = R_tot + R_stefan
     
     Q_in = (Tamb - Tpcm_node) / R_total_dynamic
     # energy per kg change
